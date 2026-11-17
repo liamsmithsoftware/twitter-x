@@ -13,8 +13,10 @@ import argparse
 import os
 import socket
 import sys
+import threading
 import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -22,15 +24,48 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def port_available(host: str, port: int) -> bool:
-    """True when nothing else is listening on this port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
-    return True
+def _try_bind_socket(host: str, port: int) -> socket.socket | None:
+    """Bind and keep a listening socket, avoiding a probe/use race."""
+    server_socket: socket.socket | None = None
+    try:
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        server_socket = socket.socket(family, socket.SOCK_STREAM)
+        # Do not set SO_REUSEADDR here: on Windows it can allow binding to a
+        # port that another process already owns.
+        server_socket.bind((host, port))
+        server_socket.listen(socket.SOMAXCONN)
+        server_socket.setblocking(False)
+        return server_socket
+    except OSError:
+        if server_socket is not None:
+            server_socket.close()
+        return None
+
+
+def bind_server_socket(host: str, preferred_port: int, span: int = 20) -> tuple[socket.socket, int]:
+    """Bind the preferred port, then a nearby free port, then an OS port.
+
+    The socket stays bound until Uvicorn takes ownership, so another process
+    cannot grab the selected port in the meantime.
+    """
+    server_socket = _try_bind_socket(host, preferred_port)
+    if server_socket is not None:
+        return server_socket, int(server_socket.getsockname()[1])
+
+    if preferred_port == 0:
+        raise OSError("The operating system could not allocate an available port.")
+
+    for candidate in range(max(1, preferred_port + 1), min(preferred_port + span + 1, 65536)):
+        server_socket = _try_bind_socket(host, candidate)
+        if server_socket is not None:
+            return server_socket, int(server_socket.getsockname()[1])
+
+    # If the nearby range is busy, ask the OS to allocate an ephemeral port
+    # instead of returning an occupied port and crashing at server startup.
+    server_socket = _try_bind_socket(host, 0)
+    if server_socket is None:
+        raise OSError("No available TCP port could be bound.")
+    return server_socket, int(server_socket.getsockname()[1])
 
 
 def is_our_app(host: str, port: int) -> bool:
@@ -44,42 +79,22 @@ def is_our_app(host: str, port: int) -> bool:
         return False
 
 
-def pick_free_port(host: str, start_port: int, span: int = 20) -> int:
-    for candidate in range(start_port, start_port + span):
-        if port_available(host, candidate):
-            return candidate
-    return start_port
+def open_browser(host: str, port: int) -> None:
+    """Open the URL that corresponds to the port the server actually bound."""
+    browser_host = "localhost" if host in ("0.0.0.0", "", "::") else host
+    if ":" in browser_host and not browser_host.startswith("["):
+        browser_host = f"[{browser_host}]"
+    url = f"http://{browser_host}:{port}"
 
+    def _open() -> None:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
 
-def handle_busy_port(host: str, port: int) -> int:
-    """
-    Decides what to do when the requested port is occupied.
-    Returns the port that should actually be used (exits the process when the
-    program is already running, so the user never sees a raw WinError 10048).
-    """
-    if port_available(host, port):
-        return port
-
-    already_running = is_our_app(host, port)
-
-    print()
-    print("=" * 62)
-    print(f"  پورت {port} در حال حاضر اشغال است.")
-    if already_running:
-        print("  به نظر می‌رسد برنامه از قبل در حال اجراست.")
-        print(f"  پنل مدیریت:  http://localhost:{port}")
-        print()
-        print("  اگر پنجره قدیمی را می‌بینید، ابتدا آن را ببندید (یا Ctrl+C بزنید)")
-        print("  و سپس دوباره برنامه را اجرا کنید.")
-        print("=" * 62)
-        raise SystemExit(0)
-
-    new_port = pick_free_port(host, port + 1)
-    print(f"  برنامه روی پورت آزاد {new_port} اجرا می‌شود:")
-    print(f"  پنل مدیریت:  http://localhost:{new_port}")
-    print("=" * 62)
-    print()
-    return new_port
+    timer = threading.Timer(3.5, _open)
+    timer.daemon = True
+    timer.start()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -96,7 +111,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="اگر پورت اشغال بود، به‌جای انتخاب پورت آزاد، برنامه متوقف شود",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not 0 <= args.port <= 65535:
+        parser.error("port must be between 0 and 65535")
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -132,23 +150,42 @@ def main(argv: list[str] | None = None) -> None:
 
     ensure_directories()
 
-    # پورت اشغال‌شده نباید باعث کرش با WinError 10048 شود
-    if port_available(args.host, args.port):
-        pass
-    elif args.strict_port:
-        print(f"خطا: پورت {args.port} اشغال است. یک پورت دیگر با --port انتخاب کنید.")
-        raise SystemExit(1)
+    requested_port = args.port
+    if args.strict_port:
+        server_socket = _try_bind_socket(args.host, requested_port)
+        if server_socket is None:
+            print(f"خطا: پورت {requested_port} اشغال است. یک پورت دیگر با --port انتخاب کنید.")
+            raise SystemExit(1)
+        args.port = int(server_socket.getsockname()[1])
     else:
-        args.port = handle_busy_port(args.host, args.port)
+        server_socket = _try_bind_socket(args.host, requested_port)
+        if server_socket is None:
+            if requested_port and is_our_app(args.host, requested_port):
+                print(f"برنامه از قبل روی پورت {requested_port} در حال اجراست.")
+                print(f"پنل مدیریت: http://localhost:{requested_port}")
+                open_browser(args.host, requested_port)
+                return
+
+            print(f"پورت {requested_port} اشغال است؛ در حال انتخاب پورت آزاد دیگری ...")
+            try:
+                server_socket, args.port = bind_server_socket(args.host, requested_port + 1)
+            except OSError as exc:
+                print(f"خطا: پورت آزاد دیگری پیدا نشد: {exc}")
+                raise SystemExit(1) from exc
+            print(f"برنامه روی پورت آزاد {args.port} اجرا می‌شود.")
+        else:
+            args.port = int(server_socket.getsockname()[1])
 
     print("=" * 68)
     print("  سامانه هوشمند جمع‌آوری و آرشیو کانال‌های ایکس")
     print(f"  آدرس پنل مدیریت:  http://localhost:{args.port}")
     print(f"  آدرس شبکه محلی:   http://{args.host}:{args.port}")
+    print("  مرورگر تا چند ثانیه دیگر باز می‌شود.")
     print("  برای خروج کلیدهای Ctrl + C را فشار دهید")
     print("=" * 68)
+    open_browser(args.host, args.port)
 
-    uvicorn.run(
+    config = uvicorn.Config(
         "app.main:app",
         host=args.host,
         port=args.port,
@@ -158,6 +195,18 @@ def main(argv: list[str] | None = None) -> None:
         forwarded_allow_ips="*",
         proxy_headers=True,
     )
+    server = uvicorn.Server(config)
+    try:
+        if args.reload:
+            # Use Uvicorn's reload supervisor with the already-bound socket so
+            # reload mode has the same port-conflict protection as normal mode.
+            from uvicorn.supervisors import ChangeReload
+
+            ChangeReload(config, target=server.run, sockets=[server_socket]).run()
+        else:
+            server.run(sockets=[server_socket])
+    finally:
+        server_socket.close()
 
 
 if __name__ == "__main__":

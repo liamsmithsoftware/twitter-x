@@ -4,7 +4,7 @@
 این فایل توسط start_windows.bat فراخوانی می‌شود و کارهای زیر را انجام می‌دهد:
   1) نصب وابستگی‌ها (فقط از wheel آماده — بدون نیاز به کامپایلر C)
   2) بررسی وابستگی‌ها
-  3) اجرای سرور روی http://localhost:8000
+  3) اجرای سرور روی پورت ۸۰۰۰ یا پورت آزاد دیگری در صورت اشغال بودن آن
 
 چرا این فایل وجود دارد؟ منطق کنسول ویندوز (cmd.exe) برای متن فارسی و
 پرانتزهای داخل if/else بسیار شکننده است؛ بنابراین تمام منطق به پایتون منتقل
@@ -13,49 +13,14 @@
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
-import threading
-import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
 VENV_PY = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 MIN_PYTHON = (3, 10)
-DEFAULT_PORT = int(os.getenv("X_COLLECTOR_PORT", "8000"))
-
-
-def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
-    return True
-
-
-def pick_port(preferred: int) -> int:
-    if port_is_free(preferred):
-        return preferred
-    print(f"      Port {preferred} is already in use, looking for a free one ...")
-    for candidate in range(preferred + 1, preferred + 21):
-        if port_is_free(candidate):
-            print(f"      Using port {candidate} instead.")
-            return candidate
-    return preferred
-
-
-def open_browser(port: int) -> None:
-    def _open() -> None:
-        try:
-            webbrowser.open(f"http://localhost:{port}")
-        except Exception:
-            pass
-
-    threading.Timer(3.5, _open).start()
 
 
 def hr() -> None:
@@ -174,33 +139,11 @@ def main() -> int:
 
     args = list(sys.argv[1:])
 
-    explicit_port: int | None = None
-    for idx, arg in enumerate(args):
-        if arg in ("--port", "-p") and idx + 1 < len(args):
-            try:
-                explicit_port = int(args[idx + 1])
-            except ValueError:
-                explicit_port = None
-        elif arg.startswith("--port="):
-            try:
-                explicit_port = int(arg.split("=", 1)[1])
-            except ValueError:
-                explicit_port = None
-
-    if explicit_port is not None:
-        # User chose a port: never override it. run.py reports a clear Persian
-        # message if it is busy (or already running) instead of crashing.
-        resolved_port = explicit_port
-        if port_is_free(explicit_port):
-            open_browser(resolved_port)
-    else:
-        resolved_port = pick_port(DEFAULT_PORT)
-        args += ["--port", str(resolved_port)]
-        open_browser(resolved_port)
-
+    # run.py owns port selection so the displayed URL and browser always use
+    # the exact port that the server successfully bound to.
     print("[3/3] Starting server ...")
-    print(f"      Address:  http://localhost:{resolved_port}")
-    print("      The browser opens automatically in a few seconds.")
+    print("      The server uses port 8000 by default and falls back if it is busy.")
+    print("      Its actual address will be printed below.")
     print("      Press Ctrl + C to stop the program.")
     print()
 

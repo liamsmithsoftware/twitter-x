@@ -61,7 +61,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-پنل: `http://localhost:8000`
+پنل به‌طور پیش‌فرض روی `http://localhost:8000` اجرا می‌شود. اگر پورت اشغال باشد، برنامه پورت آزاد دیگری انتخاب می‌کند و آدرس نهایی را در کنسول چاپ کرده و در مرورگر باز می‌کند.
 
 ```bash
 python run.py --port 9000
