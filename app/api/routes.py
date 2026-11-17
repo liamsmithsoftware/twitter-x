@@ -1,0 +1,747 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, Response
+
+from app.collectors.base import CollectorError
+from app.collectors.manager import SyncManager
+from app import config as app_config
+from app.config import DEFAULT_TIMEZONE
+from app.database import DatabaseManager
+from app.schemas import (
+    BackupRestoreRequest,
+    BulkDeleteRequest,
+    ChannelCreateRequest,
+    ChannelResetRequest,
+    ChannelUpdateRequest,
+    PurgeRequest,
+    SettingsUpdateRequest,
+)
+from app.services.exporter import create_sqlite_export_snapshot, generate_excel_bytes
+from app.services.scheduler import ChannelSchedulerService
+from app.utils.channel_parser import normalize_digits, parse_channel_input
+from app.utils.jalali import format_local_display, parse_filter_date_to_gregorian, utc_now
+
+router = APIRouter(prefix="/api")
+
+_FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def to_persian_number(value: Any) -> str:
+    """اعداد را برای نمایش در پیام‌های فارسی تبدیل می‌کند."""
+    return str(value).translate(_FA_DIGITS)
+
+
+def _get_db(request: Request) -> DatabaseManager:
+    return request.app.state.db
+
+
+def _get_sync_manager(request: Request) -> SyncManager:
+    return request.app.state.sync_manager
+
+
+def _get_scheduler(request: Request) -> ChannelSchedulerService:
+    return request.app.state.scheduler
+
+
+def _enrich_channel(ch: Dict[str, Any], tz_name: str) -> Dict[str, Any]:
+    out = dict(ch)
+    out["is_active"] = bool(ch.get("is_active"))
+    out["is_private"] = bool(ch.get("is_private"))
+    out["is_demo"] = bool(ch.get("is_demo"))
+    out["last_fetched_display"] = format_local_display(ch.get("last_fetched_at"), tz_name=tz_name)
+    out["next_fetch_display"] = format_local_display(ch.get("next_fetch_at"), tz_name=tz_name)
+    out["last_post_display"] = format_local_display(ch.get("last_post_at"), tz_name=tz_name)
+    return out
+
+
+# ------------------------------------------------------------------
+# Overview & Stats
+# ------------------------------------------------------------------
+@router.get("/overview")
+async def get_overview(request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    sync_manager = _get_sync_manager(request)
+    scheduler = _get_scheduler(request)
+
+    settings = db.get_settings()
+    tz_name = settings.get("timezone") or DEFAULT_TIMEZONE
+    stats = db.get_dashboard_stats()
+    stats["nearest_next_fetch_display"] = format_local_display(
+        stats.get("nearest_next_fetch"), tz_name=tz_name
+    )
+    stats["latest_post_display"] = format_local_display(
+        stats.get("latest_post_utc"), tz_name=tz_name
+    )
+
+    return {
+        "stats": stats,
+        "scheduler": scheduler.get_status(),
+        "collector_mode": settings.get("collector_mode", "api"),
+        "timezone": tz_name,
+        "proxy_enabled": settings.get("proxy_enabled") == "1",
+    }
+
+
+# ------------------------------------------------------------------
+# Channels Management
+# ------------------------------------------------------------------
+@router.get("/channels")
+async def list_channels(request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+    items = [_enrich_channel(ch, tz_name) for ch in db.list_channels()]
+    return {"items": items}
+
+
+@router.post("/channels")
+async def create_channel(payload: ChannelCreateRequest, request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    sync_manager = _get_sync_manager(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+
+    try:
+        parsed = parse_channel_input(payload.channel_input)
+        created = db.create_channel(
+            parsed=parsed,
+            interval_value=payload.interval_value,
+            interval_unit=payload.interval_unit,
+            initial_limit=payload.initial_limit,
+            title=payload.title,
+            is_active=payload.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sync_result = None
+    if payload.fetch_now:
+        sync_result = await sync_manager.sync_channel(int(created["id"]), trigger_type="manual")
+        refreshed = db.get_channel(int(created["id"]))
+        if refreshed:
+            created = refreshed
+
+    return {
+        "channel": _enrich_channel(created, tz_name),
+        "sync_result": sync_result,
+    }
+
+
+@router.put("/channels/{channel_id}")
+async def update_channel(
+    channel_id: int,
+    payload: ChannelUpdateRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+    try:
+        updated = db.update_channel(
+            channel_id,
+            title=payload.title,
+            interval_value=payload.interval_value,
+            interval_unit=payload.interval_unit,
+            initial_limit=payload.initial_limit,
+            is_active=payload.is_active,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"channel": _enrich_channel(updated, tz_name)}
+
+
+@router.delete("/channels/{channel_id}")
+async def delete_channel(channel_id: int, request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    ok = db.delete_channel(channel_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="حساب مورد نظر یافت نشد.")
+    return {"deleted": True, "channel_id": channel_id}
+
+
+@router.post("/channels/sync-all")
+async def sync_all_channels(request: Request) -> Dict[str, Any]:
+    sync_manager = _get_sync_manager(request)
+    return await sync_manager.sync_all_active(trigger_type="manual")
+
+
+@router.post("/channels/{channel_id}/sync")
+async def sync_single_channel(channel_id: int, request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    sync_manager = _get_sync_manager(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+
+    try:
+        result = await sync_manager.sync_channel(channel_id, trigger_type="manual")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    updated_ch = db.get_channel(channel_id)
+    return {
+        "sync_result": result,
+        "channel": _enrich_channel(updated_ch, tz_name) if updated_ch else None,
+    }
+
+
+@router.post("/channels/{channel_id}/reset")
+async def reset_channel_cursor(
+    channel_id: int,
+    payload: ChannelResetRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+    try:
+        updated = db.reset_channel_cursor(channel_id, delete_posts=payload.delete_posts)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"channel": _enrich_channel(updated, tz_name)}
+
+
+# ------------------------------------------------------------------
+# Posts Archive
+# ------------------------------------------------------------------
+@router.get("/posts")
+async def list_posts(
+    request: Request,
+    channel_id: Optional[int] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    media_type: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=200),
+) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+
+    try:
+        greg_from = parse_filter_date_to_gregorian(date_from)
+        greg_to = parse_filter_date_to_gregorian(date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    res = db.list_posts(
+        channel_id=channel_id,
+        search=search,
+        date_from_greg=greg_from,
+        date_to_greg=greg_to,
+        media_type=media_type,
+        page=page,
+        page_size=page_size,
+    )
+    for item in res["items"]:
+        item["fetched_display"] = format_local_display(item.get("fetched_at"), tz_name=tz_name)
+    return res
+
+
+@router.delete("/posts/{post_id}")
+async def delete_post(post_id: int, request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    if not db.delete_post(post_id):
+        raise HTTPException(status_code=404, detail="مطلب مورد نظر یافت نشد.")
+    return {"deleted": True, "post_id": post_id}
+
+
+@router.post("/posts/bulk-delete")
+async def bulk_delete_posts(payload: BulkDeleteRequest, request: Request) -> Dict[str, Any]:
+    """
+    حذف گروهی مطالب:
+    - بر اساس فیلتر (حساب، بازه تاریخ شمسی/میلادی، نوع محتوا، جستجو)
+    - یا بر اساس انتخاب دستی `post_ids` از جدول آرشیو
+    بدون هیچ فیلتری، تمام مطالب آرشیو حذف می‌شود.
+    """
+    db = _get_db(request)
+
+    try:
+        greg_from = parse_filter_date_to_gregorian(payload.date_from)
+        greg_to = parse_filter_date_to_gregorian(payload.date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if greg_from and greg_to and greg_from > greg_to:
+        raise HTTPException(status_code=400, detail="تاریخ شروع نمی‌تواند بعد از تاریخ پایان باشد.")
+
+    if payload.channel_id is not None and not db.get_channel(int(payload.channel_id)):
+        raise HTTPException(status_code=404, detail="حساب انتخاب‌شده یافت نشد.")
+
+    if payload.post_ids is not None and len(payload.post_ids) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="هیچ مطلبی برای حذف انتخاب نشده است. ابتدا در جدول آرشیو، ردیف‌ها را تیک بزنید.",
+        )
+
+    media_type = payload.media_type if payload.media_type and payload.media_type != "all" else None
+
+    matched = db.count_posts_for_scope(
+        channel_id=payload.channel_id,
+        date_from_greg=greg_from,
+        date_to_greg=greg_to,
+        media_type=media_type,
+        search=payload.search,
+        post_ids=payload.post_ids,
+    )
+    result = db.delete_posts_by_scope(
+        channel_id=payload.channel_id,
+        date_from_greg=greg_from,
+        date_to_greg=greg_to,
+        media_type=media_type,
+        search=payload.search,
+        post_ids=payload.post_ids,
+        reset_channel_cursors=payload.reset_channel_cursors,
+    )
+
+    if not result["deleted_posts"]:
+        message = "هیچ مطلبی مطابق با شرایط انتخاب‌شده یافت نشد."
+    elif payload.post_ids is not None:
+        message = f"{to_persian_number(result['deleted_posts'])} مطلب انتخاب‌شده حذف شد."
+    else:
+        message = f"{to_persian_number(result['deleted_posts'])} مطلب حذف شد."
+
+    return {
+        **result,
+        "matched_before_delete": matched,
+        "message": message,
+    }
+
+
+@router.get("/posts/ids")
+async def list_post_ids(
+    request: Request,
+    channel_id: Optional[int] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    media_type: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """شناسه همه مطالبی که با فیلتر فعلی مطابقت دارند (برای «انتخاب همه نتایج»)."""
+    db = _get_db(request)
+    try:
+        greg_from = parse_filter_date_to_gregorian(date_from)
+        greg_to = parse_filter_date_to_gregorian(date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    media = media_type if media_type and media_type != "all" else None
+    posts = db.get_posts_for_export(
+        channel_id=channel_id,
+        search=search,
+        date_from_greg=greg_from,
+        date_to_greg=greg_to,
+        media_type=media,
+    )
+    return {"ids": [int(p["id"]) for p in posts], "total": len(posts)}
+
+
+@router.post("/posts/purge")
+async def purge_archive(payload: PurgeRequest, request: Request) -> Dict[str, Any]:
+    """پاک‌سازی کلی: همه مطالب و گزارش‌ها، با یا بدون حساب‌ها."""
+    db = _get_db(request)
+    result = db.purge_everything(keep_channels=payload.keep_channels)
+
+    if payload.keep_channels:
+        message = (
+            f"تمام مطالب ({to_persian_number(result['deleted_posts'])} مورد) و گزارش‌ها پاک شد. "
+            "حساب‌ها حفظ شدند و شناسه آخرین پیام آن‌ها ریست شد."
+        )
+    else:
+        message = (
+            f"همه چیز پاک شد: {to_persian_number(result['deleted_channels'])} حساب، "
+            f"{to_persian_number(result['deleted_posts'])} مطلب و "
+            f"{to_persian_number(result['deleted_logs'])} گزارش."
+        )
+    return {**result, "message": message}
+
+
+# ------------------------------------------------------------------
+# Backup / Restore (channels + settings)
+# ------------------------------------------------------------------
+MAX_BACKUP_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+@router.get("/backup/export")
+async def export_backup(
+    request: Request,
+    include_settings: bool = Query(default=True, description="تنظیمات هم در فایل باشد"),
+    include_secrets: bool = Query(
+        default=False,
+        description="کلیدهای حساس (Bearer Token، رمز پروکسی) هم ذخیره شوند — پیش‌فرض: خیر",
+    ),
+    only_active: bool = Query(default=False, description="فقط حساب‌های فعال"),
+) -> Response:
+    """دانلود فایل پشتیبان JSON شامل لیست حساب‌ها، زمان‌بندی و تنظیمات."""
+    db = _get_db(request)
+    payload = db.create_backup_payload(
+        include_settings=include_settings,
+        include_secrets=include_secrets,
+        only_active=only_active,
+    )
+
+    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    stamp = utc_now().strftime("%Y%m%d_%H%M%S")
+    filename = f"x_backup_{stamp}.json"
+    return Response(
+        content=body,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/backup/inspect")
+async def inspect_backup(request: Request) -> Dict[str, Any]:
+    """پیش‌نمایش محتوای پشتیبان فعلی (بدون دانلود فایل)."""
+    db = _get_db(request)
+    payload = db.create_backup_payload(include_settings=True, include_secrets=False)
+    return {
+        "format": payload["format"],
+        "format_version": payload["format_version"],
+        "created_at": payload["created_at"],
+        "counts": payload["counts"],
+        "channels": [
+            {
+                "title": ch["title"],
+                "channel_input": ch["channel_input"],
+                "interval_value": ch["interval_value"],
+                "interval_unit": ch["interval_unit"],
+                "is_active": ch["is_active"],
+                "last_message_id": ch["last_message_id"],
+            }
+            for ch in payload["channels"]
+        ],
+        "settings": payload["settings"],
+    }
+
+
+def _parse_backup_bytes(raw: bytes) -> Dict[str, Any]:
+    if not raw:
+        raise HTTPException(status_code=400, detail="فایل پشتیبان خالی است.")
+    if len(raw) > MAX_BACKUP_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="حجم فایل پشتیبان بیش از حد مجاز (۵ مگابایت) است.")
+    try:
+        return json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="فایل انتخاب‌شده یک JSON معتبر نیست. لطفاً همان فایل پشتیبان برنامه را انتخاب کنید.",
+        ) from exc
+
+
+def _run_restore(db: DatabaseManager, data: Any, options: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        report = db.restore_from_backup(data, **options)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    summary_bits = []
+    if report["added_channels"]:
+        summary_bits.append(f"{to_persian_number(report['added_channels'])} حساب جدید اضافه شد")
+    if report["updated_channels"]:
+        summary_bits.append(f"{to_persian_number(report['updated_channels'])} حساب به‌روزرسانی شد")
+    if report["removed_channels"]:
+        summary_bits.append(f"{to_persian_number(report['removed_channels'])} حساب قبلی حذف شد")
+    if report["restored_settings"]:
+        summary_bits.append(f"{to_persian_number(report['restored_settings'])} تنظیم اعمال شد")
+    if report["skipped_channels"]:
+        summary_bits.append(f"{to_persian_number(report['skipped_channels'])} مورد نامعتبر نادیده گرفته شد")
+
+    report["message"] = (
+        "بازیابی با موفقیت انجام شد: " + "، ".join(summary_bits) + "."
+        if summary_bits
+        else "بازیابی انجام شد ولی فایل، حساب یا تنظیم قابل اعمالی نداشت."
+    )
+    return report
+
+
+@router.post("/backup/restore")
+async def restore_backup(payload: BackupRestoreRequest, request: Request) -> Dict[str, Any]:
+    """بازیابی پشتیبان از محتوای JSON (برای استفاده برنامه‌ای / API)."""
+    db = _get_db(request)
+    return _run_restore(
+        db,
+        payload.payload,
+        {
+            "mode": payload.mode,
+            "restore_settings": payload.restore_settings,
+            "overwrite_settings": payload.overwrite_settings,
+        },
+    )
+
+
+@router.post("/backup/restore-file")
+async def restore_backup_from_file(
+    request: Request,
+    file: UploadFile = File(..., description="فایل پشتیبان .json"),
+    mode: str = Query(default="merge", pattern="^(merge|replace)$"),
+    restore_settings: bool = Query(default=True),
+    overwrite_settings: bool = Query(default=False),
+) -> Dict[str, Any]:
+    """آپلود مستقیم فایل پشتیبان و بازیابی آن."""
+    db = _get_db(request)
+    raw = await file.read()
+    data = _parse_backup_bytes(raw)
+    return _run_restore(
+        db,
+        data,
+        {
+            "mode": mode,
+            "restore_settings": restore_settings,
+            "overwrite_settings": overwrite_settings,
+        },
+    )
+
+
+@router.post("/backup/validate-file")
+async def validate_backup_file(
+    request: Request,
+    file: UploadFile = File(..., description="فایل پشتیبان .json"),
+) -> Dict[str, Any]:
+    """بررسی صحت فایل پشتیبان پیش از بازیابی (بدون تغییر داده‌ها)."""
+    db = _get_db(request)
+    raw = await file.read()
+    data = _parse_backup_bytes(raw)
+    try:
+        parsed = db.validate_backup_payload(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    existing_keys = {c["channel_key"] for c in db.list_channels()}
+    new_count = 0
+    for raw_ch in parsed["channels"]:
+        try:
+            key = parse_channel_input(raw_ch["channel_input"]).channel_key
+        except ValueError:
+            continue
+        if key not in existing_keys:
+            new_count += 1
+
+    return {
+        "valid": True,
+        "format_version": parsed["format_version"],
+        "created_at": parsed["created_at"],
+        "note": parsed["note"],
+        "channels_in_file": len(parsed["channels"]),
+        "new_channels": new_count,
+        "existing_channels": len(parsed["channels"]) - new_count,
+        "settings_in_file": len(parsed["settings"]),
+        "secrets_included": any(
+            key in parsed["settings"]
+            for key in ("x_bearer_token", "proxy_username", "proxy_password")
+        ),
+        "settings_keys": sorted(parsed["settings"].keys()),
+        "message": (
+            f"فایل معتبر است: {to_persian_number(len(parsed['channels']))} حساب "
+            f"({to_persian_number(new_count)} جدید) و "
+            f"{to_persian_number(len(parsed['settings']))} تنظیم."
+        ),
+    }
+
+
+# ------------------------------------------------------------------
+# Fetch Logs
+# ------------------------------------------------------------------
+@router.get("/logs")
+async def get_logs(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    channel_id: Optional[int] = Query(default=None),
+) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+    logs = db.list_fetch_logs(limit=limit, channel_id=channel_id)
+    for lg in logs:
+        lg["created_display"] = format_local_display(lg.get("created_at"), tz_name=tz_name)
+    return {"items": logs}
+
+
+@router.delete("/logs")
+async def clear_logs(request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    removed = db.clear_fetch_logs()
+    return {"cleared": removed}
+
+
+# ------------------------------------------------------------------
+# Exports: Excel (.xlsx) & SQLite (.sqlite)
+# ------------------------------------------------------------------
+@router.get("/exports/excel")
+async def export_excel(
+    request: Request,
+    channel_id: Optional[int] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    media_type: Optional[str] = Query(default=None),
+) -> Response:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+
+    try:
+        greg_from = parse_filter_date_to_gregorian(date_from)
+        greg_to = parse_filter_date_to_gregorian(date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    posts = db.get_posts_for_export(
+        channel_id=channel_id,
+        search=search,
+        date_from_greg=greg_from,
+        date_to_greg=greg_to,
+        media_type=media_type,
+    )
+    channels = db.list_channels()
+
+    excel_bytes = generate_excel_bytes(posts=posts, channels=channels, tz_name=tz_name)
+    stamp = utc_now().strftime("%Y%m%d_%H%M%S")
+    filename = f"x_posts_{stamp}.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+@router.get("/exports/sqlite")
+async def export_sqlite(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    filtered_only: bool = Query(default=False),
+    channel_id: Optional[int] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    media_type: Optional[str] = Query(default=None),
+) -> FileResponse:
+    db = _get_db(request)
+
+    filtered_ids = None
+    if filtered_only:
+        try:
+            greg_from = parse_filter_date_to_gregorian(date_from)
+            greg_to = parse_filter_date_to_gregorian(date_to)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        matching = db.get_posts_for_export(
+            channel_id=channel_id,
+            search=search,
+            date_from_greg=greg_from,
+            date_to_greg=greg_to,
+            media_type=media_type,
+        )
+        filtered_ids = [int(p["id"]) for p in matching]
+
+    snapshot_path = create_sqlite_export_snapshot(
+        db,
+        filtered_post_ids=filtered_ids,
+        strip_sensitive_settings=True,
+    )
+    background_tasks.add_task(_unlink_quietly, snapshot_path)
+
+    stamp = utc_now().strftime("%Y%m%d_%H%M%S")
+    filename = f"x_collector_{stamp}.sqlite"
+
+    return FileResponse(
+        path=str(snapshot_path),
+        media_type="application/vnd.sqlite3",
+        filename=filename,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ------------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------------
+@router.get("/settings")
+async def get_settings_endpoint(request: Request) -> Dict[str, Any]:
+    raw = _get_db(request).get_settings()
+    public = {k: v for k, v in raw.items() if k not in {"x_bearer_token", "proxy_password"}}
+    for key in ("proxy_enabled",):
+        public[key] = raw.get(key) == "1"
+    public["default_initial_limit"] = int(raw.get("default_initial_limit") or 10)
+    public["x_bearer_token_set"] = bool(raw.get("x_bearer_token"))
+    public["proxy_password_set"] = bool(raw.get("proxy_password"))
+    return {"settings": public}
+
+
+@router.put("/settings")
+async def update_settings_endpoint(
+    payload: SettingsUpdateRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    db = _get_db(request)
+    updates: Dict[str, Any] = {}
+
+    if payload.collector_mode is not None:
+        updates["collector_mode"] = payload.collector_mode
+    if payload.timezone is not None and payload.timezone.strip():
+        try:
+            ZoneInfo(payload.timezone.strip())
+        except (ZoneInfoNotFoundError, ValueError):
+            raise HTTPException(status_code=400, detail="منطقه زمانی معتبر نیست.")
+        updates["timezone"] = payload.timezone.strip()
+    if payload.default_initial_limit is not None:
+        updates["default_initial_limit"] = str(payload.default_initial_limit)
+    if payload.x_bearer_token is not None and payload.x_bearer_token != "********":
+        updates["x_bearer_token"] = payload.x_bearer_token.strip()
+
+    if payload.proxy_enabled is not None:
+        updates["proxy_enabled"] = "1" if payload.proxy_enabled else "0"
+    if payload.proxy_type is not None:
+        updates["proxy_type"] = payload.proxy_type
+    if payload.proxy_host is not None:
+        updates["proxy_host"] = payload.proxy_host.strip()
+    if payload.proxy_port is not None:
+        clean_port = normalize_digits(payload.proxy_port).strip()
+        if clean_port and (not clean_port.isdigit() or not (1 <= int(clean_port) <= 65535)):
+            raise HTTPException(status_code=400, detail="پورت پروکسی باید عددی بین ۱ تا ۶۵۵۳۵ باشد.")
+        updates["proxy_port"] = clean_port
+    if payload.proxy_username is not None:
+        updates["proxy_username"] = payload.proxy_username.strip()
+    if payload.proxy_password is not None and payload.proxy_password != "********":
+        updates["proxy_password"] = payload.proxy_password
+
+    db.update_settings(updates)
+    return await get_settings_endpoint(request)
+
+
+@router.post("/demo/seed")
+async def seed_demo(request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    tz_name = db.get_settings().get("timezone") or DEFAULT_TIMEZONE
+    res = db.seed_demo_data(tz_name=tz_name)
+    return {
+        "seeded": True,
+        **res,
+        "message": "داده‌های نمونه آزمایشی با موفقیت بارگذاری شد. اکنون می‌توانید فیلترها و خروجی Excel و SQLite را تست کنید.",
+    }
+
+
+@router.delete("/demo")
+async def clear_demo(request: Request) -> Dict[str, Any]:
+    db = _get_db(request)
+    removed = db.clear_demo_data()
+    return {
+        "cleared_channels": removed,
+        "message": "تمامی حساب‌ها و مطالب آزمایشی پاک‌سازی شدند.",
+    }
