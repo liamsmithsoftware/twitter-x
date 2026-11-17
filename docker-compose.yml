@@ -1,0 +1,21 @@
+services:
+  x-collector:
+    build: .
+    container_name: x-account-collector
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: Asia/Tehran
+      X_COLLECTOR_DATA_DIR: /app/data
+      X_COLLECTOR_HOST: 0.0.0.0
+      X_COLLECTOR_PORT: "8000"
+    volumes:
+      # دیتابیس و خروجی‌ها در این پوشه نگهداری می‌شود
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
