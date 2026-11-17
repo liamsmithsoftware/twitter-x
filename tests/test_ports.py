@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import socket
 
+import run
 from run import _try_bind_socket, bind_server_socket
 
 
@@ -10,6 +12,15 @@ def _occupy_ephemeral_port() -> tuple[socket.socket, int]:
     blocker.bind(("127.0.0.1", 0))
     blocker.listen(socket.SOMAXCONN)
     return blocker, int(blocker.getsockname()[1])
+
+
+def test_is_our_app_treats_non_http_response_as_another_service(monkeypatch):
+    def return_bad_status(*args, **kwargs):
+        raise http.client.BadStatusLine("\x05")
+
+    monkeypatch.setattr(run.urllib.request, "urlopen", return_bad_status)
+
+    assert run.is_our_app("127.0.0.1", 8000) is False
 
 
 def test_bind_server_socket_uses_another_port_when_preferred_is_occupied():
@@ -29,8 +40,6 @@ def test_bind_server_socket_uses_another_port_when_preferred_is_occupied():
 
 
 def test_bind_server_socket_uses_os_port_when_nearby_range_is_full(monkeypatch):
-    import run
-
     requested_port = 42000
     busy_ports = {requested_port, requested_port + 1, requested_port + 2}
     attempted_ports: list[int] = []

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import os
 import socket
 import sys
@@ -75,7 +76,10 @@ def is_our_app(host: str, port: int) -> bool:
         with urllib.request.urlopen(f"http://{probe_host}:{port}/healthz", timeout=2) as response:
             body = response.read(200).decode("utf-8", "replace")
         return '"status"' in body and "ok" in body
-    except (urllib.error.URLError, OSError, ValueError):
+    except (http.client.HTTPException, urllib.error.URLError, OSError, ValueError):
+        # A different protocol (for example a SOCKS service) may answer with
+        # non-HTTP bytes such as 0x05. That means the port is occupied, but not
+        # by this app, so continue with automatic port selection.
         return False
 
 
