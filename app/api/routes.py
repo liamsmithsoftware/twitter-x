@@ -83,7 +83,7 @@ async def get_overview(request: Request) -> Dict[str, Any]:
     return {
         "stats": stats,
         "scheduler": scheduler.get_status(),
-        "collector_mode": settings.get("collector_mode", "api"),
+        "collector_mode": settings["collector_mode"],
         "timezone": tz_name,
         "proxy_enabled": settings.get("proxy_enabled") == "1",
     }
@@ -372,7 +372,7 @@ async def export_backup(
     include_settings: bool = Query(default=True, description="تنظیمات هم در فایل باشد"),
     include_secrets: bool = Query(
         default=False,
-        description="کلیدهای حساس (Bearer Token، رمز پروکسی) هم ذخیره شوند — پیش‌فرض: خیر",
+        description="نام کاربری و رمز پروکسی هم ذخیره شوند — پیش‌فرض: خیر",
     ),
     only_active: bool = Query(default=False, description="فقط حساب‌های فعال"),
 ) -> Response:
@@ -675,11 +675,10 @@ async def export_sqlite(
 @router.get("/settings")
 async def get_settings_endpoint(request: Request) -> Dict[str, Any]:
     raw = _get_db(request).get_settings()
-    public = {k: v for k, v in raw.items() if k not in {"x_bearer_token", "proxy_password"}}
+    public = {k: v for k, v in raw.items() if k != "proxy_password"}
     for key in ("proxy_enabled",):
         public[key] = raw.get(key) == "1"
     public["default_initial_limit"] = int(raw.get("default_initial_limit") or 10)
-    public["x_bearer_token_set"] = bool(raw.get("x_bearer_token"))
     public["proxy_password_set"] = bool(raw.get("proxy_password"))
     return {"settings": public}
 
@@ -692,8 +691,6 @@ async def update_settings_endpoint(
     db = _get_db(request)
     updates: Dict[str, Any] = {}
 
-    if payload.collector_mode is not None:
-        updates["collector_mode"] = payload.collector_mode
     if payload.timezone is not None and payload.timezone.strip():
         try:
             ZoneInfo(payload.timezone.strip())
@@ -702,8 +699,6 @@ async def update_settings_endpoint(
         updates["timezone"] = payload.timezone.strip()
     if payload.default_initial_limit is not None:
         updates["default_initial_limit"] = str(payload.default_initial_limit)
-    if payload.x_bearer_token is not None and payload.x_bearer_token != "********":
-        updates["x_bearer_token"] = payload.x_bearer_token.strip()
 
     if payload.proxy_enabled is not None:
         updates["proxy_enabled"] = "1" if payload.proxy_enabled else "0"

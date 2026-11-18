@@ -97,11 +97,12 @@ def test_backup_excludes_secrets_by_default(app_client):
 
 
 def test_backup_can_include_secrets_on_request(app_client):
-    app_client.put("/api/settings", json={"x_bearer_token": "supersecretvalue"})
+    app_client.put("/api/settings", json={"proxy_password": "proxypass", "x_bearer_token": "obsolete"})
     data = json.loads(
         app_client.get("/api/backup/export?include_secrets=true").content.decode("utf-8")
     )
-    assert data["settings"]["x_bearer_token"] == "supersecretvalue"
+    assert data["settings"]["proxy_password"] == "proxypass"
+    assert "x_bearer_token" not in data["settings"]
     assert data["secrets_included"] is True
 
 
@@ -245,11 +246,11 @@ def test_restore_empty_file_is_rejected(app_client):
 
 
 def test_restore_settings_only_when_requested(app_client):
-    app_client.put("/api/settings", json={"timezone": "UTC", "collector_mode": "api"})
+    app_client.put("/api/settings", json={"timezone": "UTC", "collector_mode": "web"})
     backup = json.loads(app_client.get("/api/backup/export").content.decode("utf-8"))
     assert backup["settings"]["timezone"] == "UTC"
 
-    app_client.put("/api/settings", json={"timezone": "Asia/Tehran", "collector_mode": "api"})
+    app_client.put("/api/settings", json={"timezone": "Asia/Tehran", "collector_mode": "web"})
 
     report = _upload(app_client, backup, query="?restore_settings=false").json()
     assert report["restored_settings"] == 0
@@ -354,3 +355,26 @@ def test_backup_ui_present(app_client):
     js = app_client.get("/static/js/app.js").text
     for fn in ("downloadBackup", "previewBackup", "restoreBackup", "validateBackupFile"):
         assert fn in js
+
+
+def test_upgrade_and_legacy_backup_do_not_reintroduce_api_settings(app_client, fake_web):
+    from app.database import DatabaseManager
+
+    _seed(app_client, fake_web)
+    db = app_client.app.state.db
+    with db.transaction() as conn:
+        conn.execute("UPDATE settings SET value = 'api' WHERE key = 'collector_mode'")
+        conn.execute("INSERT INTO settings VALUES ('x_bearer_token', 'old-secret')")
+    DatabaseManager(db.db_path)  # reopen an existing installation
+    with db.connection() as conn:
+        assert not conn.execute("SELECT 1 FROM settings WHERE key = 'x_bearer_token'").fetchall()
+    backup = app_client.get('/api/backup/export?include_secrets=true').json()
+    assert backup['settings']['collector_mode'] == 'web' and 'old-secret' not in str(backup)
+    backup['settings'].update(collector_mode='api', x_bearer_token='old-secret', timezone='UTC')
+    assert _upload(app_client, backup, query='?overwrite_settings=true').status_code == 200
+    settings = app_client.get('/api/settings').json()['settings']
+    assert settings['collector_mode'] == 'web' and settings['timezone'] == 'UTC'
+    assert 'x_bearer_token' not in db.get_settings()
+    assert 'old-secret' not in app_client.get('/api/backup/export?include_secrets=true').text
+    assert db.get_channel_by_key('bk_chan')['last_message_id'] == 3
+    assert app_client.get('/api/posts').json()['total'] == 3

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Example (@Example) / X</title>
+<style>article {min-height: 320px} img {width: 16px; height: 16px}</style>
+<main><div data-testid="primaryColumn"><section></section></div></main>
+<footer>Log in or sign up</footer>
+<script>
+    const timeline = document.querySelector('section');
+    const card = (author, id, contents, pinned = false) => `<article data-testid="tweet">
+        ${pinned ? '<span data-testid="socialContext">Pinned</span>' : ''}
+        <a href="/${author}/status/${id}?s=20"><time datetime="2026-11-17T09:15:00Z">Nov 17</time></a>
+        ${contents}
+    </article>`;
+    const quote = `<div role="link" tabindex="0"><a href="/example/status/999"><time>Oct 3</time></a>
+        <div data-testid="tweetText">quoted text</div><div data-testid="tweetPhoto"><img alt="quote photo"></div></div>`;
+    const latest = card('Example', '1859193287961234567', `
+        <div data-testid="tweetText"><span>سلام </span><span hidden>hidden text</span><span style="opacity:0">invisible</span><img alt="🌿"><br>جهان</div>
+        ${quote}<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/example.jpg"></div>
+        <a href="/Example/status/1859193287961234567/analytics" aria-label="1,234 Views. View post analytics">1.2K</a>`);
+    // As on the website, the initial HTML is only a shell; the next rows appear on scroll.
+    setTimeout(() => {
+        timeline.innerHTML = card('example', '85', '<div data-testid="tweetText">Pinned post</div>', true)
+            + latest + card('someone_else', '1859193287961234568', quote);
+    }, 50);
+    window.addEventListener('scroll', () => {
+        timeline.innerHTML = latest + card('example', '101', '<video poster="https://pbs.twimg.com/media/preview.jpg"></video>')
+            + card('example', '100', '<div data-testid="tweetText">Previous cursor</div>');
+    }, {once: true});
+</script></html>

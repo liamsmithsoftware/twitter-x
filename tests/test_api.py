@@ -38,7 +38,7 @@ def test_overview_starts_empty(app_client):
     assert data["stats"]["total_channels"] == 0
     assert data["stats"]["total_posts"] == 0
     assert data["scheduler"]["running"] is False  # scheduler disabled in tests
-    assert data["collector_mode"] == "api"
+    assert data["collector_mode"] == "web"
 
 
 def test_create_channel_triggers_initial_ten_posts(app_client, fake_web):
@@ -226,6 +226,7 @@ def test_logs_endpoint_and_clear(app_client, fake_web):
     assert len(logs) == 1
     assert logs[0]["status"] == "success"
     assert logs[0]["trigger_type"] == "manual"
+    assert logs[0]["source_mode"] == "web"
     assert logs[0]["new_saved_count"] == 1
     assert logs[0]["created_display"] is not None
 
@@ -291,15 +292,15 @@ def test_sqlite_export_endpoint(app_client, fake_web):
 
 def test_settings_get_and_update(app_client):
     data = app_client.get("/api/settings").json()
-    assert data["settings"]["collector_mode"] == "api"
+    assert data["settings"]["collector_mode"] == "web"
     assert data["settings"]["timezone"] == "Asia/Tehran"
     assert data["settings"]["default_initial_limit"] == 10
-    assert data["settings"]["x_bearer_token_set"] is False
+    assert "x_bearer_token_set" not in data["settings"]
 
     updated = app_client.put(
         "/api/settings",
         json={
-            "collector_mode": "api",
+            "collector_mode": "web",
             "timezone": "UTC",
             "default_initial_limit": 15,
             "proxy_enabled": True,
@@ -312,7 +313,7 @@ def test_settings_get_and_update(app_client):
     )
     assert updated.status_code == 200, updated.text
     s = updated.json()["settings"]
-    assert s["collector_mode"] == "api"
+    assert s["collector_mode"] == "web"
     assert s["timezone"] == "UTC"
     assert s["default_initial_limit"] == 15
     assert s["proxy_enabled"] is True
@@ -331,7 +332,8 @@ def test_settings_masks_secrets(app_client):
     )
     data = app_client.get("/api/settings").json()["settings"]
     assert "abcdef123456" not in str(data)
-    assert data["x_bearer_token_set"] is True
+    assert "x_bearer_token_set" not in data
+    assert "x_bearer_token" not in data
     assert "secret" not in str(data)
     assert data["proxy_password_set"] is True
 

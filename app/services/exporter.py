@@ -222,7 +222,7 @@ def create_sqlite_export_snapshot(
 ) -> Path:
     """
     Creates an atomic, portable `.sqlite` snapshot file ready for download.
-    Removes sensitive API credentials/proxy passwords from exported settings table!
+    Strip proxy credentials (and any legacy token) from the exported settings.
     """
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_path = EXPORTS_DIR / f"export_{uuid.uuid4().hex}.sqlite"

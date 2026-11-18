@@ -16,16 +16,14 @@ BACKUP_FORMAT_VERSION = 1
 
 # این تنظیمات هرگز به‌صورت پیش‌فرض در فایل پشتیبان نوشته نمی‌شوند
 BACKUP_SECRET_SETTING_KEYS = {
-    "x_bearer_token",
     "proxy_username",
     "proxy_password",
 }
 
 DEFAULT_SETTINGS: Dict[str, str] = {
-    "collector_mode": "api",
+    "collector_mode": "web",
     "timezone": DEFAULT_TIMEZONE,
     "default_initial_limit": str(DEFAULT_INITIAL_LIMIT),
-    "x_bearer_token": "",
     "proxy_enabled": "0",
     "proxy_type": "socks5",  # 'socks5' | 'http'
     "proxy_host": "",
@@ -192,6 +190,9 @@ class DatabaseManager:
                 ORDER BY p.published_at_utc DESC, p.message_id DESC;
                 """
             )
+            # Upgrade in place without touching archived posts, logs or channel cursors.
+            conn.execute("DELETE FROM settings WHERE key = 'x_bearer_token'")
+            conn.execute("UPDATE settings SET value = 'web' WHERE key = 'collector_mode' AND value != 'web'")
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute(
                     "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
@@ -206,13 +207,14 @@ class DatabaseManager:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         merged = dict(DEFAULT_SETTINGS)
         for row in rows:
-            merged[row["key"]] = row["value"]
+            if row["key"] in DEFAULT_SETTINGS:
+                merged[row["key"]] = row["value"]
         return merged
 
     def update_settings(self, updates: Dict[str, Any]) -> Dict[str, str]:
         with self.transaction() as conn:
             for key, val in updates.items():
-                if key in DEFAULT_SETTINGS and val is not None:
+                if key in DEFAULT_SETTINGS and key != "collector_mode" and val is not None:
                     conn.execute(
                         """
                         INSERT INTO settings (key, value) VALUES (?, ?)
@@ -559,7 +561,7 @@ class DatabaseManager:
             if inserted_count > 0:
                 log_msg = f"{inserted_count} مطلب جدید دریافت و ذخیره شد."
             else:
-                log_msg = "بررسی انجام شد؛ مطلب جدیدی نسبت به آخرین شناسه منتشر نشده بود."
+                log_msg = "در صفحهٔ قابل مشاهده، مطلب جدیدی برای ذخیره نبود."
 
             conn.execute(
                 """
@@ -614,7 +616,8 @@ class DatabaseManager:
             if not ch_row:
                 raise LookupError("حساب یافت نشد.")
 
-            retry_minutes = min(int(ch_row["interval_minutes"]), 15)
+            # Do not poll a blocked public page more often than the configured interval.
+            retry_minutes = int(ch_row["interval_minutes"])
             next_fetch_at = (
                 format_iso_utc(now_dt + timedelta(minutes=max(1, retry_minutes)))
                 if ch_row["is_active"]
@@ -928,7 +931,7 @@ class DatabaseManager:
 
         keep_channels=True  -> posts + logs removed, channels kept with reset cursors.
         keep_channels=False -> posts, logs AND channels removed (factory reset).
-        User settings (proxy / X API / timezone) are never touched.
+        User settings (proxy / timezone) are never touched.
         """
         now_iso = utc_now_iso()
         with self.transaction() as conn:
@@ -963,7 +966,7 @@ class DatabaseManager:
     def get_backup_settings(self, *, include_secrets: bool = False) -> Dict[str, str]:
         """
         تنظیماتی که در فایل پشتیبان نوشته می‌شوند.
-        کلیدهای حساس (Bearer Token، رمز پروکسی) به‌صورت پیش‌فرض حذف می‌شوند تا
+        نام کاربری و رمز پروکسی به‌صورت پیش‌فرض حذف می‌شوند تا
         فایل پشتیبان را بتوان با خیال راحت جابه‌جا/آرشیو کرد.
         """
         settings = self.get_settings()
@@ -1207,7 +1210,10 @@ class DatabaseManager:
 
         if restore_settings and payload["settings"]:
             incoming = payload["settings"]
-            allowed = {k: str(v) for k, v in incoming.items() if k in DEFAULT_SETTINGS and v is not None}
+            allowed = {
+                k: str(v) for k, v in incoming.items()
+                if k in DEFAULT_SETTINGS and k != "collector_mode" and v is not None
+            }
 
             if not allowed:
                 pass

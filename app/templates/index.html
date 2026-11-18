@@ -83,7 +83,7 @@
 
             <div class="stat-card">
                 <div class="stat-label">موتور دریافت و پایگاه داده</div>
-                <div class="stat-value stat-value-sm" id="statCollectorMode">API رسمی X</div>
+                <div class="stat-value stat-value-sm" id="statCollectorMode">وب عمومی X</div>
                 <div class="stat-meta" id="statDbInfo">حجم SQLite: ۰ کیلوبایت</div>
             </div>
         </section>
@@ -101,7 +101,7 @@
                 ۳. گزارش دریافت و تاریخچه
             </button>
             <button class="tab-btn" data-tab="settings" type="button">
-                ۴. تنظیمات، پروکسی و اکانت ایکس
+                ۴. تنظیمات دریافت و پروکسی
             </button>
             <button class="tab-btn" data-tab="backup" type="button">
                 ۵. پشتیبان‌گیری و بازیابی
@@ -117,9 +117,9 @@
             <div class="card">
                 <div class="card-header">
                     <div>
-                        <h2 class="card-title">افزودن حساب ایکس جدید</h2>
+                        <h2 class="card-title">افزودن حساب عمومی برای پایش</h2>
                         <p class="card-desc">
-                            آدرس یا یوزرنیم حساب را وارد کرده و بازه زمانی بررسی خودکار (از چند ساعت تا چند روز) را تعیین کنید. در اولین اتصال فقط ۱۰ مطلب آخر دریافت می‌شود و از دفعات بعد تنها مطالب جدیدتر از آخرین شناسه ذخیره خواهند شد.
+                            نام کاربری یا آدرس صفحهٔ عمومی را وارد کنید؛ به حساب کاربری یا توکن X نیاز ندارید. بار اول حداکثر تعداد انتخاب‌شده و در بررسی‌های بعد فقط پست‌های قابل مشاهده با شناسهٔ جدیدتر ذخیره می‌شوند.
                         </p>
                     </div>
                 </div>
@@ -185,13 +185,13 @@
                             value="10"
                             class="form-control"
                         />
-                        <small class="field-hint">پیش‌فرض: فقط ۱۰ مطلب آخر در شروع</small>
+                        <small class="field-hint">پیش‌فرض: حداکثر ۱۰ مطلب از صفحهٔ عمومی</small>
                     </div>
 
                     <div class="form-group form-actions-inline">
                         <label class="checkbox-label">
                             <input id="fetchNowCheck" type="checkbox" checked />
-                            <span>دریافت فوری ۱۰ مطلب آخر بلافاصله پس از افزودن</span>
+                            <span>دریافت فوری از صفحهٔ عمومی پس از افزودن</span>
                         </label>
                         <button id="btnAddChannel" type="submit" class="btn btn-primary btn-lg">
                             + افزودن حساب به لیست
@@ -407,13 +407,6 @@
                     </div>
 
                     <form id="settingsForm" class="stack-form">
-                        <div class="form-group">
-                            <label for="settingCollectorMode">روش دریافت مطالب از ایکس</label>
-                            <select id="settingCollectorMode" class="form-control">
-                                <option value="api">API رسمی X</option>
-                            </select>
-                        </div>
-
                         <div class="form-row-2">
                             <div class="form-group">
                                 <label for="settingTimezone">منطقه زمانی تفکیک تاریخ و ساعت</label>
@@ -438,7 +431,7 @@
                                 <input id="settingProxyEnabled" type="checkbox" />
                                 <span><strong>استفاده از پروکسی (SOCKS5 / HTTP)</strong> برای اتصال به ایکس</span>
                             </label>
-                            <small class="field-hint">در صورت مسدود بودن دسترسی مستقیم به api.x.com روی سیستم شما، پروکسی لوکال (مثلاً v2rayN / Nekoray / Tor) یا سرور را وارد کنید.</small>
+                            <small class="field-hint">این تنظیم اختیاری برای مرورگری است که صفحهٔ x.com را باز می‌کند. نام کاربری و رمز پروکسی فقط برای HTTP پشتیبانی می‌شود.</small>
                         </div>
 
                         <div id="proxyFieldsBox" class="proxy-box">
@@ -478,14 +471,14 @@
                     </form>
                 </div>
 
-                <!-- API رسمی X Account Login + Demo Tools -->
+                <!-- Public profile access + Demo Tools -->
                 <div class="stack-col">
                     <div class="card">
-                        <div class="card-header"><h2 class="card-title">اتصال به API رسمی X</h2>
-                        <p class="card-desc">دریافت واقعی نیازمند Bearer Token با مجوز خواندن پست‌های عمومی است. دسترسی و هزینه تابع طرح API شماست. حساب‌های محافظت‌شده پشتیبانی نمی‌شوند.</p></div>
-                        <label for="xBearerToken">Bearer Token</label>
-                        <input id="xBearerToken" type="password" autocomplete="new-password" class="form-control ltr-input" placeholder="توکن را اینجا وارد کنید" />
-                        <p class="field-hint">برای ثبت، دکمه ذخیره تنظیمات را بزنید. مقدار خالی توکن را حذف می‌کند. توکن در دیتابیس محلی ذخیره می‌شود؛ پوشه داده‌ها را امن نگه دارید.</p>
+                        <div class="card-header">
+                            <h2 class="card-title">دریافت از وب عمومی X</h2>
+                            <p class="card-desc">برنامه صفحه را در مرورگری جداگانه و بدون ورود باز می‌کند. برای شروع، در «مدیریت حساب‌ها» آدرس پروفایل را اضافه کنید.</p>
+                        </div>
+                        <p class="field-hint">اگر پست‌ها فقط پس از ورود نمایش داده شوند یا X دسترسی را محدود کند، علت در گزارش دریافت ثبت می‌شود و آخرین شناسه تغییر نمی‌کند.</p>
                     </div>
 
                     <!-- Demo & Offline Testing Helper -->
@@ -520,7 +513,7 @@
                 <div class="backup-options">
                     <label class="checkbox-label">
                         <input id="backupIncludeSettings" type="checkbox" checked />
-                        <span>تنظیمات برنامه (حالت دریافت، منطقه زمانی، پروکسی، API رسمی X) هم در فایل باشد</span>
+                        <span>تنظیمات برنامه (منطقه زمانی، تعداد دریافت اولیه و پروکسی) هم در فایل باشد</span>
                     </label>
 
                     <label class="checkbox-label">
@@ -528,7 +521,7 @@
                         <span>
                             کلیدهای حساس هم ذخیره شوند
                             <small class="field-hint block-hint">
-                                <code>Bearer Token</code> و رمز پروکسی. به‌صورت پیش‌فرض برای امنیت در فایل نوشته نمی‌شوند؛
+                                نام کاربری و رمز پروکسی. به‌صورت پیش‌فرض برای امنیت در فایل نوشته نمی‌شوند؛
                                 اگر این فایل را جای امنی نگه می‌دارید، می‌توانید تیک بزنید.
                             </small>
                         </span>
@@ -696,7 +689,7 @@
                             <span>
                                 شناسه آخرین پیام (last_message_id) حساب‌های متأثر ریست شود
                                 <small class="field-hint block-hint">
-                                    توصیه‌شده: پس از حذف، دریافت بعدی از ابتدا انجام می‌شود و همان ۱۰ مطلب آخر دوباره ذخیره می‌گردند.
+                                    توصیه‌شده: پس از حذف، دریافت بعدی از ابتدا انجام می‌شود و پست‌های قابل مشاهده تا سقف تعداد دریافت اولیه ذخیره می‌شوند.
                                     اگر تیک را بردارید، مطالبی که حذف کرده‌اید دیگر دوباره دریافت نخواهند شد.
                                 </small>
                             </span>
@@ -756,7 +749,7 @@
                 <div class="danger-row">
                     <div>
                         <strong>حذف کامل همه داده‌ها (حساب‌ها + مطالب + گزارش‌ها)</strong>
-                        <div class="field-hint">برنامه به حالت اولیه برمی‌گردد؛ تنظیمات پروکسی و API رسمی X حفظ می‌شود.</div>
+                        <div class="field-hint">برنامه به حالت اولیه برمی‌گردد؛ تنظیمات دریافت و پروکسی حفظ می‌شوند.</div>
                     </div>
                     <button id="btnPurgeEverything" type="button" class="btn btn-danger">حذف کامل همه داده‌ها</button>
                 </div>

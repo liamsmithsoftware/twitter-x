@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
- * آرشیو API رسمی X حساب‌های ایکس — Frontend Controller
+ * آرشیو وب عمومی حساب‌های ایکس — Frontend Controller
  * همه درخواست‌ها نسبت به همین دامنه و با مسیرهای /api/... ارسال می‌شوند.
  * ------------------------------------------------------------------ */
 
@@ -43,7 +43,10 @@ const MEDIA_LABELS = {
     unknown: "سایر",
 };
 
+const SOURCE_LABELS = { web: "وب عمومی X", demo: "دادهٔ نمونه", api: "API (نسخهٔ قبلی)" };
+
 const TRIGGER_LABELS = {
+    demo: "آزمایشی",
     manual: "دستی",
     scheduled: "زمان‌بندی خودکار",
 };
@@ -248,9 +251,7 @@ async function loadOverview() {
             ? `${nextFetch.date} ساعت ${nextFetch.time}`
             : "هیچ اجرای خودکاری در صف نیست";
 
-        const modeLabels = { api: "API رسمی X",
-        };
-        $("#statCollectorMode").textContent = modeLabels[data.collector_mode] || "API رسمی X";
+        $("#statCollectorMode").textContent = SOURCE_LABELS[data.collector_mode] || "—";
         $("#statDbInfo").textContent = `حجم SQLite: ${formatBytesFa(stats.db_size_bytes)}`;
 
         const scheduler = data.scheduler || {};
@@ -344,6 +345,8 @@ function renderChannels() {
                     <div class="row-actions">
                         <button class="btn btn-outline btn-sm" data-action="sync" data-id="${ch.id}">دریافت الان</button>
                         <button class="btn btn-ghost btn-sm" data-action="edit" data-id="${ch.id}">ویرایش</button>
+                        ${ch.last_status === "error" && ch.last_message_id != null
+                            ? `<button class="btn btn-ghost btn-sm" data-action="reset" data-id="${ch.id}">بازنشانی نشانگر</button>` : ""}
                         <button class="btn btn-ghost btn-sm" data-action="toggle" data-id="${ch.id}">
                             ${ch.is_active ? "غیرفعال" : "فعال"}
                         </button>
@@ -538,6 +541,21 @@ async function handleChannelAction(action, channelId, button) {
                 showToast(r.message || "دریافت مطالب با خطا مواجه شد.", "error");
             }
             await Promise.all([loadChannels(), loadOverview()]);
+        } catch (err) {
+            showToast(err.message, "error");
+        } finally {
+            setBusy(button, false);
+        }
+        return;
+    }
+
+    if (action === "reset") {
+        if (!window.confirm("نشانگر دریافت بازنشانی شود؟ آرشیو حفظ می‌شود؛ بررسی بعدی مانند دریافت اول فقط تا سقف تعداد انتخاب‌شده خواهد بود.")) return;
+        setBusy(button, true, "در حال بازنشانی...");
+        try {
+            await apiFetch(`/api/channels/${channelId}/reset`, { method: "POST", body: { delete_posts: false } });
+            showToast("نشانگر بازنشانی شد. مطالب قبلی در آرشیو باقی ماندند.", "success");
+            await loadChannels();
         } catch (err) {
             showToast(err.message, "error");
         } finally {
@@ -941,7 +959,7 @@ function renderLogs(items) {
                 <td class="ltr-text">${toFa(log.created_display || log.created_at)}</td>
                 <td>${escapeHtml(log.channel_title)}</td>
                 <td>${escapeHtml(TRIGGER_LABELS[log.trigger_type] || log.trigger_type)}</td>
-                <td>${escapeHtml("API رسمی X")}</td>
+                <td>${escapeHtml(SOURCE_LABELS[log.source_mode] || log.source_mode)}</td>
                 <td><strong>${formatNumberFa(log.new_saved_count)}</strong></td>
                 <td class="ltr-text">${toFa(log.previous_last_message_id)} &rarr; ${toFa(log.new_last_message_id)}</td>
                 <td>${toFa(log.duration_ms)} ms</td>
@@ -991,7 +1009,6 @@ async function loadSettings(checkNetwork = false) {
         const data = await apiFetch("/api/settings");
         const s = data.settings || {};
 
-        $("#settingCollectorMode").value = s.collector_mode || "api";
         $("#settingTimezone").value = s.timezone || "Asia/Tehran";
         $("#settingDefaultLimit").value = s.default_initial_limit || 10;
 
@@ -1002,8 +1019,6 @@ async function loadSettings(checkNetwork = false) {
         $("#settingProxyUser").value = s.proxy_username || "";
         $("#settingProxyPass").value = s.proxy_password_set ? "********" : "";
         toggleProxyFields();
-
-        $("#xBearerToken").value = s.x_bearer_token_set ? "********" : "";
     } catch (err) {
         showToast(err.message, "error");
     }
@@ -1019,10 +1034,8 @@ function toggleProxyFields() {
 
 function collectSettingsPayload() {
     return {
-        collector_mode: $("#settingCollectorMode").value,
         timezone: $("#settingTimezone").value,
         default_initial_limit: Number($("#settingDefaultLimit").value) || 10,
-        x_bearer_token: $("#xBearerToken").value,
         proxy_enabled: $("#settingProxyEnabled").checked,
         proxy_type: $("#settingProxyType").value,
         proxy_host: $("#settingProxyHost").value.trim(),
@@ -1408,7 +1421,7 @@ async function previewBackup() {
             `<strong>${formatNumberFa(counts.channels || 0)} حساب</strong> و ` +
             `<strong>${formatNumberFa(counts.settings || 0)} تنظیم</strong> در این پشتیبان قرار می‌گیرد.` +
             (rows ? `<ul class="backup-list">${rows}${more}</ul>` : "") +
-            `<div class="field-hint">کلیدهای حساس: ${data.settings && data.settings.x_bearer_token ? "شامل می‌شود" : "شامل نمی‌شود"}</div>`;
+            `<div class="field-hint">نام کاربری و رمز پروکسی در پیش‌نمایش نمایش داده نمی‌شوند.</div>`;
     } catch (err) {
         box.className = "preview-box danger";
         box.textContent = err.message;

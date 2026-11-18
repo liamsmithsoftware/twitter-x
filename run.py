@@ -135,8 +135,7 @@ def main(argv: list[str] | None = None) -> None:
     missing: list[str] = []
     for module_name, pip_name in (
         ("fastapi", "fastapi"),
-        ("httpx", "httpx[socks]"),
-        ("bs4", "beautifulsoup4"),
+        ("playwright", "playwright"),
         ("apscheduler", "apscheduler"),
         ("openpyxl", "openpyxl"),
         ("jdatetime", "jdatetime"),
