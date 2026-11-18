@@ -3,7 +3,7 @@
 
 این فایل توسط start_windows.bat فراخوانی می‌شود و کارهای زیر را انجام می‌دهد:
   1) نصب وابستگی‌ها (فقط از wheel آماده — بدون نیاز به کامپایلر C)
-  2) بررسی وابستگی‌ها
+  2) نصب مرورگر Chromium برای مشاهدهٔ صفحهٔ عمومی
   3) اجرای سرور روی پورت ۸۰۰۰ یا پورت آزاد دیگری در صورت اشغال بودن آن
 
 چرا این فایل وجود دارد؟ منطق کنسول ویندوز (cmd.exe) برای متن فارسی و
@@ -119,8 +119,8 @@ def main() -> int:
             pass
 
     hr()
-    print("  Telegram Channel Collector")
-    print("  سامانه جمع‌آوری و آرشیو کانال‌های ایکس")
+    print("  X Public Web Collector")
+    print("  سامانه جمع‌آوری و آرشیو حساب‌های ایکس")
     hr()
     print()
 
@@ -134,8 +134,9 @@ def main() -> int:
     if not ok:
         return fail(error)
 
-    if not (VENV_PY.parent.parent / "lib").exists() and os.name != "nt":
-        pass
+    print("Checking Chromium for public profile reads ...")
+    if subprocess.run([python, "-m", "playwright", "install", "--only-shell", "chromium"]).returncode:
+        print(r"Browser installation failed; the archive still works. To retry: .venv\Scripts\python.exe -m playwright install chromium")
 
     args = list(sys.argv[1:])
 

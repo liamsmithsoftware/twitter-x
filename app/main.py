@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router as api_router
 from app.collectors.manager import SyncManager
-from app.collectors.x_api import XAPICollector
+from app.collectors.x_web import XWebCollector
 from app.config import DB_PATH, ensure_directories
 from app.responses import SafeJSONResponse
 from app.database import DatabaseManager
@@ -26,17 +26,13 @@ def create_app(
     *,
     db_path: Optional[Path] = None,
     enable_scheduler: bool = True,
-    web_collector: Optional[XAPICollector] = None,
+    web_collector: Optional[XWebCollector] = None,
 ) -> FastAPI:
     ensure_directories()
     resolved_db_path = Path(db_path) if db_path else DB_PATH
 
     db = DatabaseManager(db_path=resolved_db_path)
-    w_collector = web_collector or XAPICollector()
-    sync_manager = SyncManager(
-        db=db,
-        web_collector=w_collector,
-    )
+    sync_manager = SyncManager(db=db, web_collector=web_collector)
     scheduler = ChannelSchedulerService(db=db, sync_manager=sync_manager)
 
     @asynccontextmanager

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from typing import List, Optional
 
 
 @dataclass
@@ -21,36 +20,8 @@ class FetchedPost:
 class FetchBatchResult:
     channel_title: Optional[str]
     posts: List[FetchedPost]
-    source_mode: str  # api
+    source_mode: str
 
 
 class CollectorError(RuntimeError):
-    """Raised when fetching posts from Telegram fails."""
-
-
-def build_httpx_proxy_url(settings: Dict[str, str]) -> Optional[str]:
-    if settings.get("proxy_enabled") != "1":
-        return None
-    host = (settings.get("proxy_host") or "").strip()
-    port = (settings.get("proxy_port") or "").strip()
-    if not host or not port:
-        return None
-
-    scheme = (settings.get("proxy_type") or "socks5").strip().lower()
-    if scheme not in ("socks5", "http", "https"):
-        scheme = "socks5"
-    if scheme == "socks5":
-        # socks5h ensures DNS resolution goes through proxy too
-        scheme_prefix = "socks5"
-    else:
-        scheme_prefix = scheme
-
-    username = (settings.get("proxy_username") or "").strip()
-    password = (settings.get("proxy_password") or "").strip()
-    if username:
-        auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
-    else:
-        auth = ""
-
-    return f"{scheme_prefix}://{auth}{host}:{port}"
-
+    """A safe, user-facing error while reading a public X profile."""

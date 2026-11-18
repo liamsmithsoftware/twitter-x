@@ -1,1 +1,1 @@
-"""X API v2 collector and synchronization."""
+"""Public X web collector and synchronization."""

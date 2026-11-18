@@ -5,7 +5,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.collectors.base import CollectorError, FetchBatchResult, FetchedPost
-from app.collectors.x_api import XAPICollector
+from app.collectors.x_web import XWebCollector
 from app.config import DEFAULT_INITIAL_LIMIT, DEFAULT_TIMEZONE
 from app.database import DatabaseManager
 from app.utils.jalali import split_datetime
@@ -15,10 +15,10 @@ class SyncManager:
     def __init__(
         self,
         db: DatabaseManager,
-        web_collector: Optional[XAPICollector] = None,
+        web_collector: Optional[XWebCollector] = None,
     ) -> None:
         self.db = db
-        self.web_collector = web_collector or XAPICollector()
+        self.web_collector = web_collector or XWebCollector()
         self._channel_locks: Dict[int, asyncio.Lock] = {}
 
     def _get_lock(self, channel_id: int) -> asyncio.Lock:
@@ -106,7 +106,6 @@ class SyncManager:
 
             settings = self.db.get_settings()
             tz_name = settings.get("timezone") or DEFAULT_TIMEZONE
-            configured_mode = settings.get("collector_mode") or "auto"
 
             self.db.mark_channel_syncing(channel_id)
             started = time.perf_counter()
@@ -130,12 +129,12 @@ class SyncManager:
                 )
             except Exception as exc:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
-                err_text = str(exc) if isinstance(exc, CollectorError) else "خطای غیرمنتظره در دریافت؛ تنظیمات و دسترسی API را بررسی کنید."
+                err_text = str(exc) if isinstance(exc, CollectorError) else "خطای غیرمنتظره در دریافت؛ دسترسی به صفحهٔ عمومی ایکس را بررسی کنید."
                 return self.db.save_sync_error(
                     channel_id=channel_id,
                     error_message=err_text,
                     trigger_type=trigger_type,
-                    source_mode=configured_mode,
+                    source_mode="web",
                     duration_ms=elapsed_ms,
                 )
 

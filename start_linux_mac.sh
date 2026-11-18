@@ -26,5 +26,10 @@ if ! ./.venv/bin/python -m pip install --prefer-binary -r requirements.txt; then
     ./.venv/bin/python -m pip install --prefer-binary --retries 5 --timeout 60 -r requirements.txt
 fi
 
+echo "→ بررسی مرورگر Chromium برای دریافت از وب عمومی ..."
+if ! ./.venv/bin/python -m playwright install --only-shell chromium; then
+    echo "مرورگر دریافت نصب نشد. آرشیو و دادهٔ نمونه در دسترس است؛ برای دریافت واقعی دستور بالا را دوباره اجرا کنید."
+fi
+
 echo "→ اجرای برنامه ..."
 exec ./.venv/bin/python run.py "$@"

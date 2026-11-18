@@ -16,7 +16,7 @@ from app.collectors.base import FetchBatchResult, FetchedPost  # noqa: E402
 
 
 class FakeWebCollector:
-    """Deterministic stand-in for the X API collector (no network in tests)."""
+    """Deterministic stand-in for the public web collector (no network in tests)."""
 
     def __init__(self, posts: Optional[List[FetchedPost]] = None, title: str = "حساب آزمایشی") -> None:
         self.posts: List[FetchedPost] = posts or []
@@ -36,7 +36,7 @@ class FakeWebCollector:
     ) -> FetchBatchResult:
         self.calls.append({"username": username, "last_message_id": last_message_id})
         # Mirror real-world behaviour: return the whole recent window, let SyncManager dedupe.
-        return FetchBatchResult(channel_title=self.title, posts=list(self.posts), source_mode="api")
+        return FetchBatchResult(channel_title=self.title, posts=list(self.posts), source_mode="web")
 
 
 def make_post(

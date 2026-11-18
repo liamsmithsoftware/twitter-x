@@ -28,10 +28,9 @@ class ChannelResetRequest(BaseModel):
 
 
 class SettingsUpdateRequest(BaseModel):
-    collector_mode: Optional[Literal["api"]] = None
+    collector_mode: Optional[Literal["web"]] = None
     timezone: Optional[str] = None
     default_initial_limit: Optional[int] = Field(default=None, ge=1, le=100)
-    x_bearer_token: Optional[str] = None
     proxy_enabled: Optional[bool] = None
     proxy_type: Optional[Literal["socks5", "http"]] = None
     proxy_host: Optional[str] = None
